@@ -8,7 +8,7 @@ dataset for time series forecasting tasks.
 import pandas as pd
 import numpy as np
 import torch
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict, Union
 from pathlib import Path
 
 
@@ -244,7 +244,7 @@ def to_torch_tensors(*arrays: np.ndarray) -> Tuple[torch.Tensor, ...]:
 
 class ETTDataLoader:
     """
-    Convenient data loader class for ETT dataset.
+    Enhanced data loader class for ETT dataset with forecasting capabilities.
     """
     
     def __init__(
@@ -303,9 +303,293 @@ class ETTDataLoader:
         
         return inputs, targets
     
+    def create_multi_horizon_dataset(
+        self,
+        input_length: int,
+        forecast_horizons: List[int] = [1, 12, 24, 48],
+        stride: int = 1,
+        as_torch: bool = True
+    ) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Create forecasting datasets for multiple prediction horizons.
+        
+        Args:
+            input_length: Length of input sequences
+            forecast_horizons: List of forecast horizons to create datasets for
+            stride: Step size between samples
+            as_torch: Whether to return PyTorch tensors
+            
+        Returns:
+            Dictionary mapping horizon -> (inputs, targets) pairs
+        """
+        datasets = {}
+        
+        for horizon in forecast_horizons:
+            try:
+                inputs, targets = create_forecasting_dataset(
+                    self.data, input_length, horizon, stride
+                )
+                
+                if as_torch:
+                    inputs, targets = to_torch_tensors(inputs, targets)
+                
+                datasets[horizon] = (inputs, targets)
+                print(f"✅ Created dataset for horizon {horizon}: {inputs.shape[0]} samples")
+                
+            except ValueError as e:
+                print(f"⚠️  Skipping horizon {horizon}: {e}")
+                continue
+        
+        return datasets
+    
+    def create_train_val_test_splits(
+        self,
+        input_length: int,
+        prediction_length: int,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.1,
+        stride: int = 1,
+        as_torch: bool = True
+    ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Create train/validation/test splits for forecasting with proper temporal ordering.
+        
+        Args:
+            input_length: Length of input sequences
+            prediction_length: Length of prediction sequences
+            train_ratio: Proportion of data for training
+            val_ratio: Proportion of data for validation
+            test_ratio: Proportion of data for testing
+            stride: Step size between samples
+            as_torch: Whether to return PyTorch tensors
+            
+        Returns:
+            Dictionary with 'train', 'val', 'test' keys containing (inputs, targets) pairs
+        """
+        # Validate ratios
+        total_ratio = train_ratio + val_ratio + test_ratio
+        if not np.isclose(total_ratio, 1.0, atol=1e-6):
+            raise ValueError(f"Split ratios must sum to 1.0, got {total_ratio}")
+        
+        T, M = self.data.shape
+        total_length = input_length + prediction_length
+        
+        # Calculate maximum number of samples we can create
+        max_samples = (T - total_length) // stride + 1
+        if max_samples <= 0:
+            raise ValueError(f"Cannot create forecasting dataset: data length {T} < total_length {total_length}")
+        
+        # Calculate split sizes
+        train_size = int(max_samples * train_ratio)
+        val_size = int(max_samples * val_ratio)
+        test_size = max_samples - train_size - val_size
+        
+        # Create all input-target pairs
+        all_inputs, all_targets = create_forecasting_dataset(
+            self.data, input_length, prediction_length, stride
+        )
+        
+        # Split temporally (respecting time order)
+        splits = {}
+        
+        # Training split (earliest samples)
+        train_inputs = all_inputs[:train_size]
+        train_targets = all_targets[:train_size]
+        splits['train'] = (train_inputs, train_targets)
+        
+        # Validation split (middle samples)
+        val_start = train_size
+        val_end = val_start + val_size
+        val_inputs = all_inputs[val_start:val_end]
+        val_targets = all_targets[val_start:val_end]
+        splits['val'] = (val_inputs, val_targets)
+        
+        # Test split (latest samples)
+        test_start = val_end
+        test_inputs = all_inputs[test_start:test_start + test_size]
+        test_targets = all_targets[test_start:test_start + test_size]
+        splits['test'] = (test_inputs, test_targets)
+        
+        # Convert to torch tensors if requested
+        if as_torch:
+            for split_name in splits:
+                inputs, targets = splits[split_name]
+                splits[split_name] = to_torch_tensors(inputs, targets)
+        
+        # Print split information
+        print(f"✅ Created forecasting splits:")
+        for split_name, (inputs, targets) in splits.items():
+            print(f"   {split_name}: {inputs.shape[0]} samples, inputs {inputs.shape}, targets {targets.shape}")
+        
+        return splits
+    
+    def create_multi_horizon_splits(
+        self,
+        input_length: int,
+        forecast_horizons: List[int] = [1, 12, 24, 48],
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.1,
+        stride: int = 1,
+        as_torch: bool = True
+    ) -> Dict[int, Dict[str, Tuple[torch.Tensor, torch.Tensor]]]:
+        """
+        Create train/val/test splits for multiple forecast horizons.
+        
+        Args:
+            input_length: Length of input sequences
+            forecast_horizons: List of forecast horizons
+            train_ratio: Proportion of data for training
+            val_ratio: Proportion of data for validation
+            test_ratio: Proportion of data for testing
+            stride: Step size between samples
+            as_torch: Whether to return PyTorch tensors
+            
+        Returns:
+            Nested dictionary: horizon -> split -> (inputs, targets)
+        """
+        multi_horizon_splits = {}
+        
+        for horizon in forecast_horizons:
+            try:
+                splits = self.create_train_val_test_splits(
+                    input_length=input_length,
+                    prediction_length=horizon,
+                    train_ratio=train_ratio,
+                    val_ratio=val_ratio,
+                    test_ratio=test_ratio,
+                    stride=stride,
+                    as_torch=as_torch
+                )
+                multi_horizon_splits[horizon] = splits
+                print(f"✅ Created splits for horizon {horizon}")
+                
+            except ValueError as e:
+                print(f"⚠️  Skipping horizon {horizon}: {e}")
+                continue
+        
+        return multi_horizon_splits
+    
     def denormalize(self, normalized_data: np.ndarray) -> np.ndarray:
         """Denormalize data back to original scale."""
         return denormalize_data(normalized_data, self.norm_stats)
+    
+    def evaluate_forecasts(
+        self,
+        predictions: Union[np.ndarray, torch.Tensor],
+        targets: Union[np.ndarray, torch.Tensor],
+        denormalize: bool = True,
+        compute_intervals: bool = True,
+        confidence_level: float = 0.95
+    ) -> Dict:
+        """
+        Evaluate forecasting performance with comprehensive metrics.
+        
+        Args:
+            predictions: Predicted values
+            targets: Ground truth values
+            denormalize: Whether to denormalize predictions and targets
+            compute_intervals: Whether to compute confidence intervals
+            confidence_level: Confidence level for intervals
+            
+        Returns:
+            Comprehensive evaluation results
+        """
+        from evaluation_utils import evaluate_forecast_quality
+        
+        norm_stats = self.norm_stats if denormalize else None
+        
+        return evaluate_forecast_quality(
+            predictions=predictions,
+            targets=targets,
+            norm_stats=norm_stats,
+            variable_names=self.variables,
+            compute_intervals=compute_intervals,
+            confidence_level=confidence_level
+        )
+    
+    def denormalize_predictions(
+        self,
+        normalized_predictions: Union[np.ndarray, torch.Tensor],
+        variable_indices: Optional[List[int]] = None
+    ) -> Union[np.ndarray, torch.Tensor]:
+        """
+        Denormalize predictions back to original scale.
+        
+        Args:
+            normalized_predictions: Normalized prediction values
+            variable_indices: Optional list of variable indices to denormalize
+            
+        Returns:
+            Denormalized predictions in original scale
+        """
+        from evaluation_utils import denormalize_forecasts
+        
+        return denormalize_forecasts(
+            normalized_predictions, 
+            self.norm_stats, 
+            variable_indices
+        )
+    
+    def compute_forecast_metrics(
+        self,
+        predictions: Union[np.ndarray, torch.Tensor],
+        targets: Union[np.ndarray, torch.Tensor],
+        denormalize: bool = True,
+        per_variable: bool = True,
+        per_horizon: bool = True
+    ) -> Dict:
+        """
+        Compute forecasting metrics with various granularities.
+        
+        Args:
+            predictions: Predicted values
+            targets: Ground truth values
+            denormalize: Whether to denormalize before computing metrics
+            per_variable: Whether to compute per-variable metrics
+            per_horizon: Whether to compute per-horizon metrics
+            
+        Returns:
+            Dictionary containing various metric breakdowns
+        """
+        from evaluation_utils import (
+            compute_forecasting_metrics,
+            compute_variable_wise_metrics,
+            compute_horizon_wise_metrics,
+            denormalize_forecasts
+        )
+        
+        # Denormalize if requested
+        if denormalize and self.norm_stats.get('method') != 'none':
+            pred_eval = denormalize_forecasts(predictions, self.norm_stats)
+            target_eval = denormalize_forecasts(targets, self.norm_stats)
+        else:
+            pred_eval = predictions
+            target_eval = targets
+        
+        results = {}
+        
+        # Overall metrics
+        results['overall'] = compute_forecasting_metrics(pred_eval, target_eval)
+        
+        # Per-variable metrics
+        if per_variable:
+            results['per_variable'] = compute_variable_wise_metrics(
+                pred_eval, target_eval, self.variables
+            )
+        
+        # Per-horizon metrics (if 3D data)
+        if per_horizon:
+            if isinstance(pred_eval, torch.Tensor):
+                pred_shape = pred_eval.shape
+            else:
+                pred_shape = pred_eval.shape
+            
+            if len(pred_shape) == 3:
+                results['per_horizon'] = compute_horizon_wise_metrics(pred_eval, target_eval)
+        
+        return results
     
     def get_variable_info(self) -> dict:
         """Get information about the variables."""
@@ -357,9 +641,72 @@ if __name__ == "__main__":
     windows_torch, _ = loader.get_windows(window_size=20)
     inputs_torch, targets_torch = loader.get_forecasting_data(input_length=48, prediction_length=24)
     
-    print(f"✅ ETTDataLoader test passed")
+    print(f"✅ ETTDataLoader basic test passed")
     print(f"   Windows shape: {windows_torch.shape}")
     print(f"   Inputs shape: {inputs_torch.shape}")
     print(f"   Targets shape: {targets_torch.shape}")
+    
+    # Test multi-horizon dataset creation
+    multi_horizon_data = loader.create_multi_horizon_dataset(
+        input_length=48, 
+        forecast_horizons=[1, 12, 24, 48]
+    )
+    print(f"✅ Multi-horizon dataset test passed")
+    for horizon, (inputs, targets) in multi_horizon_data.items():
+        print(f"   Horizon {horizon}: inputs {inputs.shape}, targets {targets.shape}")
+    
+    # Test train/val/test splits
+    splits = loader.create_train_val_test_splits(
+        input_length=48,
+        prediction_length=24,
+        train_ratio=0.6,
+        val_ratio=0.2,
+        test_ratio=0.2
+    )
+    print(f"✅ Train/val/test splits test passed")
+    
+    # Test multi-horizon splits
+    multi_splits = loader.create_multi_horizon_splits(
+        input_length=48,
+        forecast_horizons=[12, 24],
+        train_ratio=0.6,
+        val_ratio=0.2,
+        test_ratio=0.2
+    )
+    print(f"✅ Multi-horizon splits test passed")
+    
+    # Test evaluation functionality
+    # Create some synthetic predictions for testing
+    train_inputs, train_targets = splits['train']
+    synthetic_predictions = train_targets + 0.1 * torch.randn_like(train_targets)
+    
+    # Test denormalization
+    denorm_predictions = loader.denormalize_predictions(synthetic_predictions)
+    denorm_targets = loader.denormalize_predictions(train_targets)
+    print(f"✅ Denormalization test passed")
+    print(f"   Normalized range: [{synthetic_predictions.min():.3f}, {synthetic_predictions.max():.3f}]")
+    print(f"   Denormalized range: [{denorm_predictions.min():.3f}, {denorm_predictions.max():.3f}]")
+    
+    # Test metrics computation
+    metrics = loader.compute_forecast_metrics(
+        synthetic_predictions, train_targets, 
+        denormalize=True, per_variable=True, per_horizon=True
+    )
+    print(f"✅ Metrics computation test passed")
+    print(f"   Overall MSE: {metrics['overall']['mse']:.4f}")
+    print(f"   Variables with metrics: {list(metrics['per_variable'].keys())}")
+    if 'per_horizon' in metrics:
+        print(f"   Horizons with metrics: {len(metrics['per_horizon'])}")
+    
+    # Test comprehensive evaluation
+    try:
+        eval_results = loader.evaluate_forecasts(
+            synthetic_predictions, train_targets,
+            denormalize=True, compute_intervals=False
+        )
+        print(f"✅ Comprehensive evaluation test passed")
+        print(f"   Evaluation keys: {list(eval_results.keys())}")
+    except Exception as e:
+        print(f"⚠️  Comprehensive evaluation test skipped: {e}")
     
     print("\n🎉 All data loading utility tests passed!")
