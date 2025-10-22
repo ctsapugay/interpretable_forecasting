@@ -22,7 +22,7 @@ def test_extended_model_integration():
     print("📊 Loading ETT Dataset...")
     try:
         loader = ETTDataLoader(
-            file_path="ETT-small/ETTh1.csv",
+            file_path="interpretable_forecasting/ETT-small/ETTh1.csv",
             normalize='standard',
             num_samples=500  # Smaller dataset for testing
         )
