@@ -10,7 +10,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from model import InterpretableTimeEncoder, ModelConfig, load_ett_data
+import sys; sys.path.append('../main model'); from model import InterpretableTimeEncoder, ModelConfig, load_ett_data
 # import seaborn as sns  # Not needed for this visualization
 
 def visualize_integrated_model():

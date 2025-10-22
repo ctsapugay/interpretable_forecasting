@@ -7,7 +7,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from model import UnivariateFunctionLearner, load_ett_data
+import sys; sys.path.append('../main model'); from model import UnivariateFunctionLearner, load_ett_data
 
 def create_simple_visualization():
     """Create a simple, focused visualization of what the UnivariateFunctionLearner does."""

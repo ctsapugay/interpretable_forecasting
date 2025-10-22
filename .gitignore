@@ -38,3 +38,14 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Image and graph files (generated outputs)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+graphs/
+training_outputs/
+*_outputs/
+*_validation_outputs/

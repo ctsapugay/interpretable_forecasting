@@ -12,12 +12,12 @@ from pathlib import Path
 try:
     from .data_utils import ETTDataLoader
     from .extended_model import InterpretableForecastingModel, ExtendedModelConfig
-    from .spline_visualization import create_spline_visualizations
+    import sys; sys.path.append('../visualizations'); import sys; sys.path.append('../visualizations'); from spline_visualization import create_spline_visualizations
 except ImportError:
     # Handle case when running as script
     from data_utils import ETTDataLoader
     from extended_model import InterpretableForecastingModel, ExtendedModelConfig
-    from spline_visualization import create_spline_visualizations
+    import sys; sys.path.append('../visualizations'); from spline_visualization import create_spline_visualizations
 
 
 def test_spline_visualization():

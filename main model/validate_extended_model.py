@@ -22,13 +22,13 @@ try:
     from .data_utils import ETTDataLoader
     from .extended_model import InterpretableForecastingModel, ExtendedModelConfig
     from .model import InterpretableTimeEncoder, ModelConfig
-    from .spline_visualization import create_spline_visualizations
+    import sys; sys.path.append('../visualizations'); import sys; sys.path.append('../visualizations'); from spline_visualization import create_spline_visualizations
 except ImportError:
     # Handle case when running as script
     from data_utils import ETTDataLoader
     from extended_model import InterpretableForecastingModel, ExtendedModelConfig
     from model import InterpretableTimeEncoder, ModelConfig
-    from spline_visualization import create_spline_visualizations
+    import sys; sys.path.append('../visualizations'); from spline_visualization import create_spline_visualizations
 
 
 class ExtendedModelValidator:

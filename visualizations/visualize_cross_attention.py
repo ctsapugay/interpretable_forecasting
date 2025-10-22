@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 # - data_utils: ETTDataLoader (nice-to-have)
 # - model: load_ett_data (fallback if loader is unavailable)
 try:
-    from extended_model import InterpretableForecastingModel, ExtendedModelConfig
+    import sys; sys.path.append('../main model'); from extended_model import InterpretableForecastingModel, ExtendedModelConfig
 except Exception as e:
     print("❌ Could not import extended_model. Make sure extended_model.py is in the repo.")
     raise
@@ -31,7 +31,7 @@ except Exception:
     HAVE_LOADER = False
 
 try:
-    from model import load_ett_data
+    import sys; sys.path.append('../main model'); from model import load_ett_data
     HAVE_LOAD_ETT = True
 except Exception:
     HAVE_LOAD_ETT = False

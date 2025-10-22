@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
-from model import TemporalSelfAttention, UnivariateFunctionLearner, load_ett_data
+import sys; sys.path.append('../main model'); from model import TemporalSelfAttention, UnivariateFunctionLearner, load_ett_data
 
 # Set style for better-looking plots
 plt.style.use('default')
