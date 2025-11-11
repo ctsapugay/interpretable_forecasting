@@ -14,6 +14,15 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+# Import sparsemax for sparse attention
+try:
+    from entmax import sparsemax
+    SPARSEMAX_AVAILABLE = True
+except ImportError:
+    SPARSEMAX_AVAILABLE = False
+    print("⚠️  Warning: entmax not installed. Using standard softmax instead of sparsemax.")
+    print("   Install with: pip install entmax")
+
 
 @dataclass
 class ModelConfig:

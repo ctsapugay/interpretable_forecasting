@@ -49,3 +49,6 @@ graphs/
 training_outputs/
 *_outputs/
 *_validation_outputs/
+
+# Test files (local testing only)
+tests/

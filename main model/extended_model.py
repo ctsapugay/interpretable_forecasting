@@ -16,6 +16,15 @@ from dataclasses import dataclass
 from typing import Tuple, Dict, Any, Optional
 import warnings
 
+# Import sparsemax for sparse attention
+try:
+    from entmax import sparsemax
+    SPARSEMAX_AVAILABLE = True
+except ImportError:
+    SPARSEMAX_AVAILABLE = False
+    print("⚠️  Warning: entmax not installed. Using standard softmax instead of sparsemax.")
+    print("   Install with: pip install entmax")
+
 try:
     from .model import InterpretableTimeEncoder, ModelConfig
 except ImportError:
@@ -289,7 +298,7 @@ class CrossVariableAttention(nn.Module):
         Returns:
             Tuple containing:
             - attended_embeddings: Cross-attended embeddings of shape (B, M, T, cross_dim)
-            - attention_weights: Attention weights of shape (B, num_heads, M, M)
+            - attention_weights: Per-head attention weights of shape (B, T, num_heads, M, M)
         """
         batch_size, num_vars, seq_len, embed_dim = x.shape
         
@@ -330,12 +339,11 @@ class CrossVariableAttention(nn.Module):
         final_output = final_output.reshape(batch_size, seq_len, num_vars, self.cross_dim)
         final_output = final_output.transpose(1, 2)  # (B, M, T, cross_dim)
         
-        # Average attention weights across time steps for interpretability
-        # attn_weights: (B*T, num_heads, M, M) -> (B, num_heads, M, M)
+        # Reshape attention weights to include time dimension for full interpretability
+        # attn_weights: (B*T, num_heads, M, M) -> (B, T, num_heads, M, M)
         attn_weights = attn_weights.reshape(batch_size, seq_len, self.num_heads, num_vars, num_vars)
-        attn_weights_avg = attn_weights.mean(dim=1)  # Average over time dimension
         
-        return final_output, attn_weights_avg
+        return final_output, attn_weights
 
 
 class TemporalEncoder(nn.Module):
@@ -439,8 +447,11 @@ class TemporalEncoder(nn.Module):
             x_projected.transpose(-2, -1)
         ) * self.attention_scale  # (B, M, 1, T)
         
-        # Apply softmax to get attention weights
-        compression_attn = torch.softmax(attention_scores, dim=-1)  # (B, M, 1, T)
+        # Apply sparsemax (or softmax if unavailable) to get sparse attention weights
+        if SPARSEMAX_AVAILABLE:
+            compression_attn = sparsemax(attention_scores, dim=-1)  # (B, M, 1, T) - sparse!
+        else:
+            compression_attn = torch.softmax(attention_scores, dim=-1)  # (B, M, 1, T)
         
         # Apply weighted temporal pooling to compress sequence length
         # Maintain variable-specific compression patterns
@@ -488,15 +499,9 @@ class SplineFunctionLearner(nn.Module):
         # Validate parameters
         self._validate_parameters()
         
-        # Create control point prediction network from compressed representations
-        self.control_point_predictor = nn.Sequential(
-            nn.Linear(input_dim, input_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(input_dim * 2, input_dim),
-            nn.ReLU(),
-            nn.Linear(input_dim, num_control_points)
-        )
+        # NOTE: Control point prediction MLP removed for interpretability
+        # Control points are now generated directly from compressed representations
+        # via a simple linear projection in InterpretableForecastingModel
         
         # Initialize B-spline basis functions and knot vector
         self.knot_vector = self._create_knot_vector()
@@ -506,12 +511,10 @@ class SplineFunctionLearner(nn.Module):
         self.register_buffer('_knot_vector', self.knot_vector)
         self.register_buffer('_basis_functions', self.basis_functions)
         
-        print(f"✅ SplineFunctionLearner initialized:")
-        print(f"   Input dim: {input_dim}")
+        print(f"✅ SplineFunctionLearner initialized (basis functions only):")
         print(f"   Control points: {num_control_points}")
         print(f"   Spline degree: {spline_degree}")
         print(f"   Forecast horizon: {forecast_horizon}")
-        print(f"   Stability constraints: {stability_constraints}")
     
     def _validate_parameters(self):
         """Validate spline parameters for mathematical correctness."""
@@ -672,32 +675,28 @@ class SplineFunctionLearner(nn.Module):
         
         return n - 1  # Fallback
     
-    def forward(self, compressed_repr: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, control_points: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        Forward pass that predicts control points and generates spline forecasts.
+        Forward pass that generates spline forecasts from control points.
+        
+        NOTE: Control points are now passed in directly (not predicted by MLP).
+        This makes the forecasting process fully interpretable.
         
         Args:
-            compressed_repr: Compressed representations of shape (B, M, input_dim)
+            control_points: Control points of shape (B, M, num_control_points)
             
         Returns:
             Dictionary containing:
             - 'forecasts': Spline-based forecasts of shape (B, M, forecast_horizon)
-            - 'control_points': Predicted control points of shape (B, M, num_control_points)
+            - 'control_points': Input control points (passed through)
             - 'basis_functions': B-spline basis functions of shape (forecast_horizon, num_control_points)
             - 'knot_vector': Knot vector for the B-splines
         """
-        batch_size, num_vars, input_dim = compressed_repr.shape
+        batch_size, num_vars, num_cp = control_points.shape
         
         # Input validation
-        if input_dim != self.input_dim:
-            raise ValueError(f"Expected input_dim {self.input_dim}, got {input_dim}")
-        
-        # Predict control points for each variable
-        control_points = self.control_point_predictor(compressed_repr)  # (B, M, num_control_points)
-        
-        # Apply stability constraints if enabled
-        if self.stability_constraints:
-            control_points = self._apply_stability_constraints(control_points)
+        if num_cp != self.num_control_points:
+            raise ValueError(f"Expected {self.num_control_points} control points, got {num_cp}")
         
         # Generate spline forecasts using basis functions and control points
         # basis_functions: (forecast_horizon, num_control_points)
@@ -1031,9 +1030,15 @@ class InterpretableForecastingModel(nn.Module):
             compression_ratio=self.config.compression_ratio
         )
         
-        # SplineFunctionLearner for interpretable forecasting
+        # Control point projection: compressed_repr → control points (direct, interpretable)
+        self.control_point_projection = nn.Linear(
+            self.compressed_dim,
+            self.config.num_control_points
+        )
+        
+        # SplineFunctionLearner for interpretable forecasting (basis functions only)
         self.spline_learner = SplineFunctionLearner(
-            input_dim=self.compressed_dim,
+            input_dim=self.compressed_dim,  # Not used anymore, kept for compatibility
             num_control_points=self.config.num_control_points,
             spline_degree=self.config.spline_degree,
             forecast_horizon=self.config.forecast_horizon,
@@ -1043,7 +1048,8 @@ class InterpretableForecastingModel(nn.Module):
         print("✅ Extended components initialized")
         print("   CrossVariableAttention: Implemented")
         print("   TemporalEncoder: Implemented")
-        print("   SplineFunctionLearner: Implemented")
+        print("   Control Point Projection: Direct linear mapping (interpretable)")
+        print("   SplineFunctionLearner: Basis functions only")
     
     def _init_output_projection(self):
         """Initialize output projection layers if needed."""
@@ -1096,6 +1102,8 @@ class InterpretableForecastingModel(nn.Module):
             # Stage 2: Cross-variable attention
             try:
                 cross_embeddings, cross_attn = self.cross_attention(var_embeddings)
+                # cross_embeddings: (B, M, T, cross_dim)
+                # cross_attn: (B, T, num_heads, M, M) - per-head, per-timestep attention
             except Exception as e:
                 raise RuntimeError(f"Error in cross-variable attention stage: {str(e)}")
             
@@ -1105,12 +1113,16 @@ class InterpretableForecastingModel(nn.Module):
             except Exception as e:
                 raise RuntimeError(f"Error in temporal compression stage: {str(e)}")
             
-            # Stage 4: Spline-based forecasting
+            # Stage 4: Direct control point projection (interpretable!)
             try:
-                spline_results = self.spline_learner(compressed_repr)
+                # Project compressed representation directly to control points
+                control_points = self.control_point_projection(compressed_repr)  # (B, M, num_control_points)
+                
+                # Generate forecasts from control points using B-spline basis functions
+                spline_results = self.spline_learner(control_points)
                 forecasts = spline_results['forecasts']
                 spline_params = {
-                    'control_points': spline_results['control_points'],
+                    'control_points': control_points,  # Now directly from projection
                     'basis_functions': spline_results['basis_functions'],
                     'knot_vector': spline_results['knot_vector']
                 }
@@ -1586,7 +1598,7 @@ def test_cross_variable_attention():
         attended_embeddings, attn_weights = cross_attn(x)
         
         expected_output_shape = (case['batch_size'], case['num_vars'], case['seq_len'], case['cross_dim'])
-        expected_attn_shape = (case['batch_size'], case['num_heads'], case['num_vars'], case['num_vars'])
+        expected_attn_shape = (case['batch_size'], case['seq_len'], case['num_heads'], case['num_vars'], case['num_vars'])
         
         assert attended_embeddings.shape == expected_output_shape, \
             f"Expected output shape {expected_output_shape}, got {attended_embeddings.shape}"
@@ -1594,7 +1606,7 @@ def test_cross_variable_attention():
             f"Expected attention shape {expected_attn_shape}, got {attn_weights.shape}"
         
         print(f"✅ Output embeddings shape: {attended_embeddings.shape}")
-        print(f"✅ Attention weights shape: {attn_weights.shape}")
+        print(f"✅ Attention weights shape: {attn_weights.shape} (per-head, per-timestep)")
         
         # Test 2: Attention weight properties
         print("2. Testing attention weight properties...")
