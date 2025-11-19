@@ -30,6 +30,11 @@ from evaluation_utils import (
     compute_variable_wise_metrics,
     denormalize_forecasts
 )
+import sys
+# Ensure the visualizations module is importable without modifying PYTHONPATH externally
+_vis_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'visualizations'))
+if _vis_path not in sys.path:
+    sys.path.insert(0, _vis_path)
 from spline_visualization import create_spline_visualizations
 import matplotlib.pyplot as plt
 
@@ -421,9 +426,15 @@ def main():
     
     scheduler = None
     if args.scheduler:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
-        )
+        # Support both older and newer PyTorch versions (some lack 'verbose' kw)
+        try:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            )
+        except TypeError:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5
+            )
     
     criterion = nn.MSELoss()
     
