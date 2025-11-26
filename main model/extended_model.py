@@ -50,15 +50,22 @@ class ExtendedModelConfig:
     compressed_dim: int = 64         # Compressed representation dimension
     compression_ratio: int = 4       # Temporal compression ratio (T -> T/ratio)
     compression_method: str = 'attention'  # 'attention' or 'pooling'
+    # NEW: number of compression queries per variable
+    num_compression_queries: int = 1
     
     # Spline forecasting parameters
     num_control_points: int = 8      # Number of B-spline control points
     spline_degree: int = 3           # B-spline degree (typically 3 for cubic)
     forecast_horizon: int = 24       # Default forecast steps ahead
     spline_stability: bool = True    # Enable spline stability constraints
+    # NEW: smoothing strength (0 = no smoothing, 1 = strong smoothing)
+    spline_smooth_alpha: float = 1.0
     
     # Multi-horizon forecasting
     forecast_horizons: list = None   # Multiple forecast horizons [1, 12, 24, 48]
+    
+    # NEW: optionally use a simple linear head instead of splines (diagnostics)
+    use_spline_head: bool = True
     
     def __post_init__(self):
         """Validate configuration parameters after initialization."""
@@ -128,9 +135,17 @@ class ExtendedModelConfig:
         if self.forecast_horizon <= 0:
             raise ValueError(f"forecast_horizon must be positive, got {self.forecast_horizon}")
         
+        # Multi-query compression validation
+        if self.num_compression_queries <= 0:
+            raise ValueError(f"num_compression_queries must be positive, got {self.num_compression_queries}")
+        
         # Sequence length validation
         if self.max_len <= 0:
             raise ValueError(f"max_len must be positive, got {self.max_len}")
+        
+        # Spline smoothing strength
+        if not (0.0 <= self.spline_smooth_alpha <= 1.0):
+            raise ValueError(f"spline_smooth_alpha must be in [0, 1], got {self.spline_smooth_alpha}")
         
         # Cross-compatibility warnings
         if self.cross_dim != self.embed_dim:
@@ -207,8 +222,12 @@ class ExtendedModelConfig:
         
         # New components
         estimates['cross_attention'] = self.cross_dim * self.cross_dim * 3 * self.cross_heads
-        estimates['temporal_encoder'] = self.cross_dim * self.compressed_dim + batch_size * self.num_variables * seq_len
-        estimates['spline_learner'] = self.compressed_dim * self.num_control_points + self.num_control_points * self.forecast_horizon
+        estimates['temporal_encoder'] = (
+            self.cross_dim * self.compressed_dim
+            + batch_size * self.num_variables * seq_len * self.num_compression_queries
+        )
+        effective_compressed = self.compressed_dim * self.num_compression_queries
+        estimates['spline_learner'] = effective_compressed * self.num_control_points + self.num_control_points * self.forecast_horizon
         
         # Activation memory (approximate)
         estimates['activations'] = batch_size * seq_len * (
@@ -350,13 +369,16 @@ class TemporalEncoder(nn.Module):
         input_dim: Input dimension from cross-attention embeddings
         compressed_dim: Output compressed representation dimension
         compression_ratio: Ratio for temporal compression (T -> T/ratio)
+        num_queries: Number of compression queries per variable
     """
     
-    def __init__(self, input_dim: int, compressed_dim: int, compression_ratio: int = 4):
+    def __init__(self, input_dim: int, compressed_dim: int, compression_ratio: int = 4,
+                 num_queries: int = 1):
         super().__init__()
         self.input_dim = input_dim
         self.compressed_dim = compressed_dim
         self.compression_ratio = compression_ratio
+        self.num_queries = num_queries
         
         # Validate parameters
         if input_dim <= 0:
@@ -365,11 +387,12 @@ class TemporalEncoder(nn.Module):
             raise ValueError(f"compressed_dim must be positive, got {compressed_dim}")
         if compression_ratio <= 0:
             raise ValueError(f"compression_ratio must be positive, got {compression_ratio}")
+        if num_queries <= 0:
+            raise ValueError(f"num_queries must be positive, got {num_queries}")
         
-        # Set up learnable compression query parameters for each variable
-        # Each variable gets its own compression query to learn variable-specific patterns
+        # Learnable compression queries (per query, shared across variables)
         self.compression_query = nn.Parameter(
-            torch.randn(1, 1, 1, input_dim) * 0.02  # Small initialization
+            torch.randn(1, num_queries, 1, input_dim) * 0.02  # (1, Q, 1, D)
         )
         
         # Input projection to ensure compatibility
@@ -378,23 +401,22 @@ class TemporalEncoder(nn.Module):
         else:
             self.input_projection = nn.Identity()
         
-        # Create attention mechanism for temporal pooling
-        # Use scaled dot-product attention for compression
+        # Scaled dot-product attention scale
         self.attention_scale = (input_dim ** -0.5)
         
-        # Layer normalization for stability
-        self.layer_norm = nn.LayerNorm(compressed_dim)
+        # Layer normalization for stability (after flattening queries)
+        self.layer_norm = nn.LayerNorm(compressed_dim * num_queries)
         
-        # Optional: Additional MLP for post-compression processing
+        # Additional MLP for post-compression processing
         self.post_compression_mlp = nn.Sequential(
-            nn.Linear(compressed_dim, compressed_dim * 2),
+            nn.Linear(compressed_dim * num_queries, compressed_dim * num_queries * 2),
             nn.ReLU(),
-            nn.Linear(compressed_dim * 2, compressed_dim),
+            nn.Linear(compressed_dim * num_queries * 2, compressed_dim * num_queries),
             nn.Dropout(0.1)
         )
         
         print(f"✅ TemporalEncoder initialized:")
-        print(f"   Input dim: {input_dim} → Compressed dim: {compressed_dim}")
+        print(f"   Input dim: {input_dim} → Compressed dim: {compressed_dim} (queries={num_queries})")
         print(f"   Compression ratio: {compression_ratio}")
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -410,8 +432,8 @@ class TemporalEncoder(nn.Module):
                
         Returns:
             Tuple containing:
-            - compressed_repr: Compressed representations of shape (B, M, compressed_dim)
-            - compression_attn: Compression attention weights of shape (B, M, 1, T)
+            - compressed_repr: Compressed representations of shape (B, M, num_queries * compressed_dim)
+            - compression_attn: Compression attention weights of shape (B, M, num_queries, T)
         """
         batch_size, num_vars, seq_len, input_dim = x.shape
         
@@ -422,39 +444,40 @@ class TemporalEncoder(nn.Module):
         # Apply input projection if needed
         x_projected = self.input_projection(x)  # (B, M, T, compressed_dim)
         
-        # Generate compression attention weights to identify important time steps
-        # Expand compression query to match batch and variable dimensions
-        compression_query = self.compression_query.expand(batch_size, num_vars, 1, self.input_dim)
+        # Expand compression queries: (1, Q, 1, D) -> (B, M, Q, D)
+        # Start by expanding over batch, then over variables, keeping an explicit time-dim of 1
+        cq = self.compression_query.expand(batch_size, self.num_queries, 1, self.input_dim)  # (B, Q, 1, D)
+        cq = cq.unsqueeze(1).expand(batch_size, num_vars, self.num_queries, 1, self.input_dim)  # (B, M, Q, 1, D)
+        cq = cq.squeeze(-2)  # (B, M, Q, D)
         
-        # Project query to compressed dimension if needed
+        # Project queries if needed
         if self.input_dim != self.compressed_dim:
-            query_projected = self.input_projection(compression_query)  # (B, M, 1, compressed_dim)
+            query_projected = self.input_projection(cq)  # (B, M, Q, compressed_dim)
         else:
-            query_projected = compression_query
+            query_projected = cq  # (B, M, Q, compressed_dim)
         
-        # Compute attention scores between compression query and all time steps
-        # query: (B, M, 1, compressed_dim), keys: (B, M, T, compressed_dim)
+        # Compute attention scores between queries and all time steps
+        # query: (B, M, Q, compressed_dim), keys: (B, M, T, compressed_dim)
         attention_scores = torch.matmul(
-            query_projected, 
+            query_projected,
             x_projected.transpose(-2, -1)
-        ) * self.attention_scale  # (B, M, 1, T)
+        ) * self.attention_scale  # (B, M, Q, T)
         
-        # Apply softmax to get attention weights
-        compression_attn = torch.softmax(attention_scores, dim=-1)  # (B, M, 1, T)
+        # Softmax over time
+        compression_attn = torch.softmax(attention_scores, dim=-1)  # (B, M, Q, T)
         
-        # Apply weighted temporal pooling to compress sequence length
-        # Maintain variable-specific compression patterns
-        compressed = torch.matmul(compression_attn, x_projected)  # (B, M, 1, compressed_dim)
-        compressed = compressed.squeeze(-2)  # (B, M, compressed_dim)
+        # Weighted temporal pooling
+        compressed = torch.matmul(compression_attn, x_projected)  # (B, M, Q, compressed_dim)
         
-        # Apply layer normalization
+        # Flatten queries into feature dimension
+        compressed = compressed.view(batch_size, num_vars, self.num_queries * self.compressed_dim)
+        
+        # Layer normalization and post-compression MLP
         compressed_normalized = self.layer_norm(compressed)
-        
-        # Apply post-compression MLP for additional processing
         compressed_final = self.post_compression_mlp(compressed_normalized)
         
-        # Add residual connection if dimensions match
-        if compressed_normalized.shape == compressed_final.shape:
+        # Residual connection
+        if compressed_final.shape == compressed_normalized.shape:
             compressed_final = compressed_normalized + compressed_final
         
         return compressed_final, compression_attn
@@ -477,13 +500,15 @@ class SplineFunctionLearner(nn.Module):
     """
     
     def __init__(self, input_dim: int, num_control_points: int = 8, spline_degree: int = 3, 
-                 forecast_horizon: int = 24, stability_constraints: bool = True):
+                 forecast_horizon: int = 24, stability_constraints: bool = True,
+                 smooth_alpha: float = 1.0):
         super().__init__()
         self.input_dim = input_dim
         self.num_control_points = num_control_points
         self.spline_degree = spline_degree
         self.forecast_horizon = forecast_horizon
         self.stability_constraints = stability_constraints
+        self.smooth_alpha = smooth_alpha
         
         # Validate parameters
         self._validate_parameters()
@@ -725,16 +750,17 @@ class SplineFunctionLearner(nn.Module):
         # Clamp control points to reasonable ranges to prevent extreme values
         control_points = torch.clamp(control_points, min=-10.0, max=10.0)
         
-        # Optional: Apply smoothness constraint (penalize large differences between adjacent points)
-        # This can be done during training via regularization, but here we apply a simple smoothing
-        if self.num_control_points > 2:
-            # Apply light smoothing to reduce sharp changes
+        # Apply smoothness constraint via interpolation with a smoothed version
+        if self.num_control_points > 2 and self.smooth_alpha > 0.0:
             smoothed = control_points.clone()
             for i in range(1, self.num_control_points - 1):
-                smoothed[:, :, i] = 0.25 * control_points[:, :, i-1] + \
-                                   0.5 * control_points[:, :, i] + \
-                                   0.25 * control_points[:, :, i+1]
-            control_points = smoothed
+                smoothed[:, :, i] = (
+                    0.25 * control_points[:, :, i - 1]
+                    + 0.5 * control_points[:, :, i]
+                    + 0.25 * control_points[:, :, i + 1]
+                )
+            alpha = self.smooth_alpha
+            control_points = (1.0 - alpha) * control_points + alpha * smoothed
         
         return control_points
     
@@ -984,6 +1010,8 @@ class InterpretableForecastingModel(nn.Module):
         self.cross_dim = config.cross_dim
         self.compressed_dim = config.compressed_dim
         self.forecast_horizon = config.forecast_horizon
+        # Effective compressed dimension after flattening queries
+        self.effective_compressed_dim = config.compressed_dim * config.num_compression_queries
         
         # Initialize existing components
         self._init_base_components()
@@ -1028,16 +1056,18 @@ class InterpretableForecastingModel(nn.Module):
         self.temporal_encoder = TemporalEncoder(
             input_dim=self.cross_dim,
             compressed_dim=self.compressed_dim,
-            compression_ratio=self.config.compression_ratio
+            compression_ratio=self.config.compression_ratio,
+            num_queries=self.config.num_compression_queries
         )
         
         # SplineFunctionLearner for interpretable forecasting
         self.spline_learner = SplineFunctionLearner(
-            input_dim=self.compressed_dim,
+            input_dim=self.effective_compressed_dim,
             num_control_points=self.config.num_control_points,
             spline_degree=self.config.spline_degree,
             forecast_horizon=self.config.forecast_horizon,
-            stability_constraints=self.config.spline_stability
+            stability_constraints=self.config.spline_stability,
+            smooth_alpha=self.config.spline_smooth_alpha
         )
         
         print("✅ Extended components initialized")
@@ -1105,17 +1135,26 @@ class InterpretableForecastingModel(nn.Module):
             except Exception as e:
                 raise RuntimeError(f"Error in temporal compression stage: {str(e)}")
             
-            # Stage 4: Spline-based forecasting
+            # Stage 4: Forecasting head (spline or linear)
             try:
-                spline_results = self.spline_learner(compressed_repr)
-                forecasts = spline_results['forecasts']
-                spline_params = {
-                    'control_points': spline_results['control_points'],
-                    'basis_functions': spline_results['basis_functions'],
-                    'knot_vector': spline_results['knot_vector']
-                }
+                if self.config.use_spline_head:
+                    spline_results = self.spline_learner(compressed_repr)
+                    forecasts = spline_results['forecasts']
+                    spline_params = {
+                        'control_points': spline_results['control_points'],
+                        'basis_functions': spline_results['basis_functions'],
+                        'knot_vector': spline_results['knot_vector']
+                    }
+                else:
+                    forecasts = self._placeholder_forecast(compressed_repr)
+                    spline_params = self._placeholder_spline_params(
+                        batch_size=batch_size,
+                        num_vars=self.num_variables,
+                        device=x.device,
+                        dtype=x.dtype
+                    )
             except Exception as e:
-                raise RuntimeError(f"Error in spline forecasting stage: {str(e)}")
+                raise RuntimeError(f"Error in forecasting head stage: {str(e)}")
             
             # Validate spline stability
             self._validate_spline_stability(spline_params)

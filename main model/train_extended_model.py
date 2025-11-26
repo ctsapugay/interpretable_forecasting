@@ -341,6 +341,12 @@ def main():
     parser.add_argument('--compressed-dim', type=int, default=64)
     parser.add_argument('--num-control-points', type=int, default=8)
     parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--num-compression-queries', type=int, default=1,
+                        help='Number of compression queries per variable')
+    parser.add_argument('--spline-smooth-alpha', type=float, default=1.0,
+                        help='Spline smoothing strength in [0,1]')
+    parser.add_argument('--no-spline-head', action='store_true',
+                        help='Use simple linear head instead of spline head (diagnostics)')
     
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50)
@@ -348,6 +354,8 @@ def main():
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--weight-decay', type=float, default=1e-5)
     parser.add_argument('--scheduler', action='store_true', help='Use learning rate scheduler')
+    parser.add_argument('--warmup-epochs', type=int, default=0,
+                        help='Number of warmup epochs at reduced learning rate')
     
     # Logging arguments
     parser.add_argument('--save-dir', default='training_outputs')
@@ -409,7 +417,10 @@ def main():
         compressed_dim=args.compressed_dim,
         num_control_points=args.num_control_points,
         forecast_horizon=args.forecast_horizon,
-        dropout=args.dropout
+        dropout=args.dropout,
+        num_compression_queries=args.num_compression_queries,
+        spline_smooth_alpha=args.spline_smooth_alpha,
+        use_spline_head=not args.no_spline_head
     )
     
     model = InterpretableForecastingModel(model_config).to(device)
@@ -454,6 +465,15 @@ def main():
     print(f"\n🎯 Starting training for {args.epochs} epochs...\n")
     
     for epoch in range(1, args.epochs + 1):
+        # Optional warmup: use lower LR for first few epochs
+        if args.warmup_epochs > 0 and epoch <= args.warmup_epochs:
+            warmup_lr = args.lr * 0.3
+            for g in optimizer.param_groups:
+                g['lr'] = warmup_lr
+        elif not args.scheduler:
+            # Keep LR fixed at base value when not using a scheduler
+            for g in optimizer.param_groups:
+                g['lr'] = args.lr
         # Train
         train_loss, train_mae = train_epoch(
             model, train_loader, optimizer, criterion, device
