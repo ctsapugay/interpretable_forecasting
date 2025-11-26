@@ -4,14 +4,184 @@ Data loading utilities for ETT dataset and time series windowing.
 This module provides functions to load and preprocess the ETT (Electricity Transformer Temperature) 
 dataset for time series forecasting tasks.
 """
-
+import json
 import pandas as pd
 import numpy as np
 import torch
-from typing import Tuple, Optional, List, Dict, Union
+from typing import Optional, Tuple, Optional, List, Dict, Union, Any
 from pathlib import Path
+from dataclasses import dataclass
 
 
+# ------------------------------------------------------------------------------------------ #
+# ------------------------- DatasetConfig class: ------------------------------------------- #
+@dataclass
+class DatasetConfig:
+    """Configuration for dataset loading."""
+    file_path: str
+    variable_columns: List[str]
+    date_column: Optional[str] = 'date'
+    num_variables: Optional[int] = None
+    
+    def __post_init__(self):
+        if self.num_variables is None:
+            self.num_variables = len(self.variable_columns)
+    
+    @classmethod
+    def from_json(cls, config_path: str = "dataset_config.json") -> 'DatasetConfig':
+        """Load configuration from JSON file."""
+        config_file = Path(config_path)
+        
+        if not config_file.exists():
+            raise FileNotFoundError(
+                f"❌ Dataset configuration file not found: {config_path}\n"
+                f"   Please create a dataset_config.json file with your dataset settings.\n"
+                f"   Example:\n"
+                f"   {{\n"
+                f'     "file_path": "my_data.csv",\n'
+                f'     "variable_columns": ["var1", "var2", "var3"],\n'
+                f'     "date_column": "date",\n'
+                f'     "num_variables": 3\n'
+                f"   }}"
+            )
+        
+        with open(config_file, 'r') as f:
+            config_dict = json.load(f)
+        
+        return cls(**config_dict)
+    
+    def to_json(self, config_path: str = "dataset_config.json"):
+        """Save configuration to JSON file."""
+        config_dict = {
+            'file_path': self.file_path,
+            'variable_columns': self.variable_columns,
+            'date_column': self.date_column,
+            'num_variables': self.num_variables
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(config_dict, f, indent=2)
+        
+        print(f"✅ Saved dataset configuration to {config_path}")
+
+
+# Global config instance (loaded once)
+_DATASET_CONFIG: Optional[DatasetConfig] = None
+
+
+def get_dataset_config(config_path: str = "dataset_config.json") -> DatasetConfig:
+    """
+    Get the global dataset configuration (singleton pattern).
+    
+    Loads configuration once and caches it for subsequent calls.
+    """
+    global _DATASET_CONFIG
+    
+    if _DATASET_CONFIG is None:
+        _DATASET_CONFIG = DatasetConfig.from_json(config_path)
+        print(f"✅ Loaded dataset configuration from {config_path}")
+        print(f"   File: {_DATASET_CONFIG.file_path}")
+        print(f"   Variables: {_DATASET_CONFIG.variable_columns}")
+        print(f"   Date column: {_DATASET_CONFIG.date_column}")
+    
+    return _DATASET_CONFIG
+
+
+def set_dataset_config(config: DatasetConfig):
+    """Manually set the global dataset configuration."""
+    global _DATASET_CONFIG
+    _DATASET_CONFIG = config
+
+
+def load_time_series_data(
+    file_path: Optional[str] = None,
+    variable_columns: Optional[List[str]] = None,
+    date_column: Optional[str] = None,
+    num_samples: Optional[int] = None,
+    config: Optional[DatasetConfig] = None
+) -> Tuple[np.ndarray, pd.DatetimeIndex, List[str]]:
+    """
+    Load time series data with configuration support.
+    
+    Priority order:
+    1. Explicit parameters (if provided)
+    2. Provided config object
+    3. Global config from dataset_config.json
+    
+    Args:
+        file_path: Path to data file (overrides config)
+        variable_columns: Variable column names (overrides config)
+        date_column: Date column name (overrides config)
+        num_samples: Number of samples to load
+        config: DatasetConfig object (overrides global config)
+        
+    Returns:
+        data: numpy array (T, M)
+        dates: DatetimeIndex or RangeIndex
+        variables: List of variable names
+    """
+    
+    # Load config if not provided
+    if config is None:
+        config = get_dataset_config()
+    
+    # Use explicit parameters if provided, otherwise use config
+    file_path = file_path or config.file_path
+    variable_columns = variable_columns or config.variable_columns
+    date_column = date_column if date_column is not None else config.date_column
+    
+    # Load CSV
+    try:
+        df = pd.read_csv(file_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"❌ Data file not found: {file_path}\n"
+            f"   Check the file_path in your dataset_config.json"
+        )
+    
+    if num_samples is not None:
+        df = df.head(num_samples)
+    
+    print(f"📊 Loaded CSV: {len(df)} rows, {len(df.columns)} columns")
+    
+    # Handle date column
+    dates = None
+    if date_column and date_column in df.columns:
+        try:
+            dates = pd.to_datetime(df[date_column])
+            print(f"✅ Using date column: '{date_column}'")
+        except Exception as e:
+            print(f"⚠️  Could not parse '{date_column}' as datetime: {e}")
+            dates = pd.RangeIndex(len(df))
+    else:
+        if date_column:
+            print(f"⚠️  Date column '{date_column}' not found, using integer index")
+        dates = pd.RangeIndex(len(df))
+    
+    # Validate variable columns exist
+    missing = [c for c in variable_columns if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"❌ Variable columns not found in data: {missing}\n"
+            f"   Available columns: {list(df.columns)}\n"
+            f"   Check variable_columns in your dataset_config.json"
+        )
+    
+    # Extract data
+    variables = variable_columns
+    data = df[variables].values.astype(np.float32)
+    
+    print(f"✅ Loaded {len(variables)} variables: {variables}")
+    print(f"   Data shape: {data.shape}")
+    if dates is not None and hasattr(dates, 'min'):
+        print(f"   Date range: {dates.min()} to {dates.max()}")
+    
+    return data, dates, variables
+
+
+
+# ------------------------------------------------------------------------------------------ #
+# ------------------------- Rest of code: -------------------------------------------------- #
 def load_ett_data(
     file_path: str = "interpretable_forecasting/ETT-small/ETTh1.csv",
     num_samples: Optional[int] = None
@@ -37,7 +207,8 @@ def load_ett_data(
             df = df.head(num_samples)
         
         # Extract the 7 variables (excluding date column)
-        variables = ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
+        # variables = ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
+        variables = cols = [c for c in df.columns if c.lower() != "date"]        
         data = df[variables].values.astype(np.float32)
         
         # Parse dates
@@ -245,32 +416,42 @@ def to_torch_tensors(*arrays: np.ndarray) -> Tuple[torch.Tensor, ...]:
 class ETTDataLoader:
     """
     Enhanced data loader class for ETT dataset with forecasting capabilities.
+
+    Now supports any dataset through dataset_config.json.
     """
     
     def __init__(
         self,
-        file_path: str = "interpretable_forecasting/ETT-small/ETTh1.csv",
+        file_path: Optional[str] = None,
+        variable_columns: Optional[List[str]] = None,
+        date_column: Optional[str] = None,
         normalize: str = 'standard',
-        num_samples: Optional[int] = None
+        num_samples: Optional[int] = None,
+        config: Optional[DatasetConfig] = None
     ):
         """
-        Initialize the ETT data loader.
+        Initialize data loader.
         
-        Args:
-            file_path: Path to ETT CSV file
-            normalize: Normalization method ('standard', 'minmax', or 'none')
-            num_samples: Number of samples to load (None for all)
+        If no parameters provided, loads from dataset_config.json.
         """
-        self.file_path = file_path
+        self.config = config or get_dataset_config()
         self.normalize_method = normalize
         
-        # Load and normalize data
-        self.raw_data, self.dates, self.variables = load_ett_data(file_path, num_samples)
+        # Load data using config
+        self.raw_data, self.dates, self.variables = load_time_series_data(
+            file_path=file_path,
+            variable_columns=variable_columns,
+            date_column=date_column,
+            num_samples=num_samples,
+            config=self.config
+        )
+        
+        # Normalize
         self.data, self.norm_stats = normalize_data(self.raw_data, normalize)
         
         print(f"✅ ETTDataLoader initialized")
-        print(f"   Data shape: {self.data.shape}")
         print(f"   Variables: {self.variables}")
+        print(f"   Samples: {len(self.data)}")
     
     def get_windows(
         self,

@@ -1,0 +1,6 @@
+{
+  "file_path": "ETT-small/ETTh1.csv",
+  "variable_columns": ["HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT"],
+  "date_column": "date",
+  "num_variables": 7
+}

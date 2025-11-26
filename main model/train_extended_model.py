@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
-from data_utils import ETTDataLoader
+from data_utils import ETTDataLoader, DatasetConfig
 from data_splitting import ETTDataSplitter, DataSplitConfig
 from extended_model import InterpretableForecastingModel, ExtendedModelConfig
 from evaluation_utils import (
@@ -318,8 +318,17 @@ def validate(model, val_loader, criterion, device, norm_stats=None, return_sampl
 def main():
     parser = argparse.ArgumentParser(description='Train Extended Forecasting Model')
     
-    # Data arguments
-    parser.add_argument('--data-path', default='ETT-small/ETTh1.csv')
+
+    # Data arguments - now optional, reads from config by default
+    parser.add_argument('--config', default='dataset_config.json',
+                       help='Path to dataset configuration file')
+    parser.add_argument('--data-path', default=None,
+                       help='Override data path from config')
+    parser.add_argument('--variable-columns', nargs='+', default=None,
+                       help='Override variable columns from config')
+
+
+    # parser.add_argument('--data-path', default='ETT-small/ETTh1.csv')
     parser.add_argument('--input-length', type=int, default=96)
     parser.add_argument('--forecast-horizon', type=int, default=24)
     parser.add_argument('--stride', type=int, default=1)
@@ -367,6 +376,33 @@ def main():
     
     print("\n📊 Loading and splitting data...")
     
+    # Load dataset configuration
+    try:
+        dataset_config = DatasetConfig.from_json(args.config)
+        print(f"✅ Loaded dataset config from {args.config}")
+        print(f"   File: {dataset_config.file_path}")
+        print(f"   Variables: {dataset_config.variable_columns}")
+        print(f"   Date column: {dataset_config.date_column}")
+    except FileNotFoundError:
+        print(f"⚠️  Config file not found, using defaults for ETT dataset")
+        dataset_config = DatasetConfig(
+            file_path='ETT-small/ETTh1.csv',
+            variable_columns=['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT'],
+            date_column='date',
+            num_variables=7
+        )
+    
+    # Override with command-line arguments if provided
+    if args.data_path:
+        print(f"   Overriding file_path: {args.data_path}")
+        dataset_config.file_path = args.data_path
+    
+    if args.variable_columns:
+        print(f"   Overriding variable_columns: {args.variable_columns}")
+        dataset_config.variable_columns = args.variable_columns
+        dataset_config.num_variables = len(args.variable_columns)
+
+
     # Use proper temporal splitting
     split_config = DataSplitConfig(
         train_ratio=args.train_ratio,
@@ -375,7 +411,7 @@ def main():
     )
     
     data_splitter = ETTDataSplitter(
-        file_path=args.data_path,
+        config=dataset_config,      # NEW: Pass config object
         split_config=split_config,
         normalize='standard'
     )
@@ -388,8 +424,8 @@ def main():
     print(f"   Test batches: {len(test_loader)}")
     
     # Get variable names for visualization
-    variable_names = data_splitter.variables
-    num_variables = len(variable_names)
+    variable_names = dataset_config.variable_columns
+    num_variables = dataset_config.num_variables
     
     print(f"\n🏗️ Building model...")
     
