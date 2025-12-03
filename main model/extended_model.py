@@ -66,6 +66,9 @@ class ExtendedModelConfig:
     
     # NEW: optionally use a simple linear head instead of splines (diagnostics)
     use_spline_head: bool = True
+    # NEW: optional residual correction head on top of spline forecasts
+    use_residual_head: bool = True
+    residual_scale: float = 1.0
     
     def __post_init__(self):
         """Validate configuration parameters after initialization."""
@@ -146,6 +149,9 @@ class ExtendedModelConfig:
         # Spline smoothing strength
         if not (0.0 <= self.spline_smooth_alpha <= 1.0):
             raise ValueError(f"spline_smooth_alpha must be in [0, 1], got {self.spline_smooth_alpha}")
+        
+        if self.residual_scale < 0.0:
+            raise ValueError(f"residual_scale must be non-negative, got {self.residual_scale}")
         
         # Cross-compatibility warnings
         if self.cross_dim != self.embed_dim:
@@ -599,8 +605,9 @@ class SplineFunctionLearner(nn.Module):
             Basis function matrix of shape (forecast_horizon, num_control_points)
         """
         # Create evaluation points for forecast horizon
-        # Map forecast steps to parameter space [0, 1] and then extrapolate
-        t_eval = torch.linspace(1.0, 1.5, self.forecast_horizon)  # Extrapolate beyond [0,1]
+        # Use the full knot parameter space [0, 1] so that all control points
+        # contribute meaningfully and receive gradients.
+        t_eval = torch.linspace(0.0, 1.0, self.forecast_horizon)
         
         # Initialize basis function matrix
         basis_matrix = torch.zeros(self.forecast_horizon, self.num_control_points)
@@ -781,8 +788,9 @@ class SplineFunctionLearner(nn.Module):
         if self.stability_constraints:
             control_points = self._apply_stability_constraints(control_points)
         
-        # Generate basis functions for the new horizon
-        t_eval = torch.linspace(1.0, 1.0 + 0.5 * horizon / self.forecast_horizon, horizon)
+        # Generate basis functions for the new horizon over [0, 1]
+        # (keeps all control points active even for different horizons)
+        t_eval = torch.linspace(0.0, 1.0, horizon)
         basis_matrix = torch.zeros(horizon, self.num_control_points, device=compressed_repr.device)
         
         for i in range(horizon):
@@ -897,7 +905,7 @@ class SplineFunctionLearner(nn.Module):
         knot_vector = spline_results['knot_vector']
         
         # Generate high-resolution spline curve for smooth visualization
-        t_fine = torch.linspace(1.0, 1.5, 200)  # Fine grid for smooth curve
+        t_fine = torch.linspace(0.0, 1.0, 200)  # Fine grid for smooth curve over [0, 1]
         basis_fine = torch.zeros(200, self.num_control_points, device=compressed_repr.device)
         
         for i, t in enumerate(t_fine):
@@ -926,7 +934,7 @@ class SplineFunctionLearner(nn.Module):
             'forecast_points': spline_results['forecasts'][batch_idx, variable_idx],
             'basis_functions': basis_functions,
             'knot_vector': knot_vector,
-            'forecast_parameter_space': torch.linspace(1.0, 1.5, self.forecast_horizon)
+            'forecast_parameter_space': torch.linspace(0.0, 1.0, self.forecast_horizon)
         }
     
     def analyze_spline_properties(self, compressed_repr: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -1070,6 +1078,14 @@ class InterpretableForecastingModel(nn.Module):
             smooth_alpha=self.config.spline_smooth_alpha
         )
         
+        # Optional residual correction head operating on compressed representations
+        if self.config.use_residual_head:
+            self.residual_head = nn.Linear(
+                self.effective_compressed_dim, self.forecast_horizon
+            )
+        else:
+            self.residual_head = None
+        
         print("✅ Extended components initialized")
         print("   CrossVariableAttention: Implemented")
         print("   TemporalEncoder: Implemented")
@@ -1146,6 +1162,7 @@ class InterpretableForecastingModel(nn.Module):
                         'knot_vector': spline_results['knot_vector']
                     }
                 else:
+                    # Linear-only head for diagnostics
                     forecasts = self._placeholder_forecast(compressed_repr)
                     spline_params = self._placeholder_spline_params(
                         batch_size=batch_size,
@@ -1153,6 +1170,12 @@ class InterpretableForecastingModel(nn.Module):
                         device=x.device,
                         dtype=x.dtype
                     )
+                
+                # Optional residual correction head added on top of forecasts
+                residual_output = None
+                if self.residual_head is not None and self.config.residual_scale > 0.0:
+                    residual_output = self.residual_head(compressed_repr)  # (B, M, H)
+                    forecasts = forecasts + self.config.residual_scale * residual_output
             except Exception as e:
                 raise RuntimeError(f"Error in forecasting head stage: {str(e)}")
             
@@ -1167,6 +1190,7 @@ class InterpretableForecastingModel(nn.Module):
                     'cross_attention': cross_attn,
                     'compression_attention': compression_attn,
                     'spline_parameters': spline_params,
+                    'residual_forecast': residual_output,
                     'variable_embeddings': var_embeddings,
                     'cross_embeddings': cross_embeddings,
                     'compressed_repr': compressed_repr

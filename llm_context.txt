@@ -1,0 +1,157 @@
+LLM Context: Interpretable Forecasting Project
+
+Purpose
+- Build an interpretable multivariate time-series forecasting system that combines univariate function learners, temporal self-attention, cross-variable attention, temporal compression, and a spline-based forecasting head. We benchmark against strong baselines (LSTM, TCN, seasonal naive) on ETTh1 while emphasizing interpretability artifacts (attention maps, spline control points, basis functions) and clean data handling.
+
+Core Goals
+- Accurate multi-horizon forecasting on ETTh1 with consistent data splits and normalization.
+- First-class interpretability: expose temporal attention, cross-variable attention, compression weights, and B-spline parameters for forecasts.
+- Reproducible experiments with clear outputs and standardized directory structure.
+
+Dataset
+- ETT (Electricity Transformer Temperature) dataset (hourly) with 7 variables: HUFL, HULL, MUFL, MULL, LUFL, LULL, OT.
+- Files in: interpretable_forecasting/ETT-small/ (ETTh1.csv, ETTh2.csv, ETTm1.csv, ETTm2.csv).
+- Default experiment setup used in this repo:
+  - input_length=96, forecast_horizon=24, stride=1
+  - temporal split ratios: train=0.7, val=0.2, test=0.1
+  - normalization: standard (fit on train only, applied to val/test)
+
+Repository Structure (top-level under interpretable_forecasting/)
+- benchmarks/test_models/: LSTM/TCN/seasonal-naive implementations and training utilities for baselines.
+- benchmark_eval.py: Orchestrates all three baselines with consistent config and outputs to benchmark_outputs/.
+- benchmark_outputs/: Timestamped baseline runs (lstm_baseline/, tcn_baseline/, seasonal_naive/).
+- main model/: Extended interpretable model code and scripts.
+  - extended_model.py, model.py: Model implementations.
+  - data_utils.py, data_splitting.py: Data loading/splitting utilities for forecasting windows.
+  - evaluation_utils.py: Metrics and denormalization helpers.
+  - train_extended_model.py: Full training loop for the extended model.
+  - validate_extended_model.py, validate_model.py: Validation/end-to-end checks and visualizations.
+  - tests: test_* files covering data pipeline, spline learner, attention integration, etc.
+  - training_outputs/: Timestamped extended-model training runs with configs and interpretability artifacts.
+- model_eval_outputs/: Structured evaluation runs for curated extended-model configs (spline-only/residual variants).
+- visualizations/: Visualization scripts (spline, attention, integrated model views).
+- GAM/: Simple GAM exploration and plots for comparison/perspective.
+- readmes/: Deep dives into architecture pieces and visualizations.
+- README.md: Detailed documentation and quick start (already comprehensive).
+
+Running Baselines (consistent ETTh1 setup)
+- Single entry point (prefers local venv if present):
+  - python benchmark_eval.py --epochs 50
+- Produces outputs under benchmark_outputs/:
+  - benchmark_outputs/lstm_baseline/<timestamp>/
+  - benchmark_outputs/tcn_baseline/<timestamp>/
+  - benchmark_outputs/seasonal_naive/<timestamp>/
+- Each run includes: config.json, results.json (train/val history), test_results.json (final test metrics), forecast_examples.png, and checkpoints/best.pt when applicable.
+
+Baseline Model Configs (as used in the attached results)
+- LSTM: hidden_size=128, num_layers=2, dropout=0.1, bidirectional=false; batch_size=32; lr=1e-3; epochs=50.
+- TCN: channels=[64,64,64], kernel_size=3, dropout=0.1; batch_size=32; lr=1e-3; epochs=50.
+- Seasonal Naive: season_length=24.
+- Shared: input_length=96, forecast_horizon=24, stride=1, normalize=standard, seed=42, device=cuda if available.
+
+Running the Extended Interpretable Model
+- Train (example from README; adjust flags as needed):
+  - cd interpretable_forecasting
+  - python "main model/train_extended_model.py" --data-path "ETT-small/ETTh1.csv" --input-length 96 --forecast-horizon 24 --batch-size 32 --epochs 50 --lr 5e-4 --num-compression-queries 2 --num-control-points 16 --spline-smooth-alpha 0.3 --no-residual-head
+- Key CLI flags (train_extended_model.py):
+  - Data: --data-path, --input-length, --forecast-horizon, --stride, --train-ratio, --val-ratio, --test-ratio
+  - Model: --embed-dim, --hidden-dim, --num-heads, --cross-dim, --cross-heads, --compressed-dim, --num-control-points, --dropout, --num-compression-queries, --spline-smooth-alpha, --no-spline-head, --no-residual-head
+  - Training: --epochs, --batch-size, --lr, --weight-decay, --scheduler, --warmup-epochs
+  - Logging: --save-dir (default main model/training_outputs), --save-freq (default 5), --patience (default 10)
+- Artifacts saved under main model/training_outputs/<timestamp>/:
+  - config.json (full CLI config), best_model.pt, test_results.json, interpretability/ (val_attention_epoch_*.png, splines_val_epoch_*/ and splines_test_final_epoch_*/ subfolders, training_curves.png).
+
+Extended Model Architecture (very high level)
+- Univariate Function Learners: per-variable MLPs for embeddings.
+- Temporal Self-Attention: captures intra-variable temporal dependencies with interpretable attention matrices.
++- Cross-Variable Attention: variable-to-variable relationships (M×M), interpretable heatmaps.
++- Temporal Compression: attention-based pooling to compressed_dim; exposes compression attention.
++- Spline Function Learner: predicts B-spline control points to generate horizon-length forecasts. Exposes control points, basis functions, knot vectors.
+- Optional Residual Head: linear residual on top of spline forecasts for accuracy/robustness trade-offs.
+
+Evaluation Conventions
+- Metrics computed on denormalized scale: MSE, MAE, RMSE, MAPE.
+- Validation history stored in results.json for baselines; extended model stores history inside best checkpoint and plots under interpretability/.
+- Test metrics saved to test_results.json for both baselines and extended model variants.
+
+Current Results (exact values from attached runs)
+- Baselines
+  - LSTM (benchmark_outputs/lstm_baseline/20251202_190236/results.json)
+    - Best Val MSE: 8.260811805725098
+    - Test: MSE=6.770660400390625, MAE=1.4472657442092896, RMSE=2.6020493507385254, MAPE=33754224.0
+    - Config: input_length=96, forecast_horizon=24, num_variables=7, hidden_size=128, num_layers=2, dropout=0.1, bidirectional=false
+  - TCN (benchmark_outputs/tcn_baseline/20251202_190741/results.json)
+    - Best Val MSE: 7.821508407592773
+    - Test: MSE=6.899050712585449, MAE=1.4548975229263306, RMSE=2.6266043186187744, MAPE=39159724.0
+    - Config: input_length=96, forecast_horizon=24, num_variables=7, channels=[64,64,64], kernel_size=3, dropout=0.1
+  - Seasonal Naive (benchmark_outputs/seasonal_naive/20251202_191006/results.json)
+    - Best Val MSE: 9.48806381225586
+    - Test: MSE=9.125944137573242, MAE=1.531371831893921, RMSE=3.0209176540374756, MAPE=49201584.0
+    - Config: input_length=96, forecast_horizon=24, num_variables=7, season_length=24
+- Extended Model Variants (model_eval_outputs/*/…/test_results.json)
+  - spline_only_alpha0.6_cp12_q1/20251202_163029
+    - Test Loss: 0.3848547660836987
+    - Test: MSE=6.894492149353027, MAE=1.473912239074707, RMSE=2.6257364749908447, MAPE=27946610.0
+    - Best Epoch: 38
+  - spline_only_alpha0.3_cp16_q2/20251202_161100
+    - Test Loss: 0.36439251958155167
+    - Test: MSE=6.5111188888549805, MAE=1.451000690460205, RMSE=2.551689386367798, MAPE=32733418.0
+    - Best Epoch: 22
+  - spline_only_alpha0.1_cp24_q3/20251202_162048
+    - Test Loss: 0.38359162065328334
+    - Test: MSE=6.800943374633789, MAE=1.4446401596069336, RMSE=2.6078617572784424, MAPE=31046582.0
+    - Best Epoch: 16
+  - residual_on_alpha0.15_cp24_q3/20251202_165042
+    - Test Loss: 0.35798415132597383
+    - Test: MSE=6.4620208740234375, MAE=1.430274486541748, RMSE=2.54205060005188, MAPE=29976078.0
+    - Best Epoch: 17
+  - residual_on_alpha0.3_cp16_q2/20251202_164055
+    - Test Loss: 0.34644483292804046
+    - Test: MSE=6.537510871887207, MAE=1.4283502101898193, RMSE=2.5568556785583496, MAPE=31288710.0
+    - Best Epoch: 23
+- Best-per-metric across all above runs
+  - Best Test MSE: 6.4620208740234375 (residual_on_alpha0.15_cp24_q3)
+  - Best Test RMSE: 2.54205060005188 (residual_on_alpha0.15_cp24_q3)
+  - Best Test MAE: 1.4283502101898193 (residual_on_alpha0.3_cp16_q2)
+  - Best Test MAPE: 27946610.0 (spline_only_alpha0.6_cp12_q1)
+  - Lowest baseline Val MSE: 7.821508407592773 (TCN baseline)
+
+Outputs and Where to Find Them
+- Baselines: benchmark_outputs/<model>/<timestamp>/
+  - config.json, results.json (full training/val history), test_results.json (final denormalized metrics), forecast_examples.png, checkpoints/best.pt.
+- Extended model: main model/training_outputs/<timestamp>/
+  - config.json, best_model.pt, test_results.json, interpretability/ (attention maps and spline visualization folders), training_curves.png.
+- Curated evaluations: model_eval_outputs/<experiment_name>/<timestamp>/ with the same artifact structure.
+
+Data & Preprocessing Invariants
+- Splits are strictly temporal; no leakage across train/val/test.
+- Normalization is computed on train only; cached statistics are applied to val/test and used to denormalize outputs for metrics and visualizations.
+- Forecasting windows produced via ETTDataSplitter.get_forecasting_data for each split.
+
+Interpretablity Artifacts
+- Temporal attention (per variable), Cross-variable attention (M×M), Compression attention (time-step importances).
+- Spline parameters: control points, basis functions, knot vectors.
+- Visualizations saved periodically (by --save-freq) and at test time (splines_test_final_epoch_*).
+
+How To Extend
+- New datasets: add loaders/splitters in main model/data_utils.py and data_splitting.py; ensure train-only normalization and denorm for metrics.
+- New baselines: add a script in benchmarks/test_models/ and wire it in benchmark_eval.py to ensure consistent configs and outputs.
+- New model variants: extend ExtendedModelConfig and InterpretableForecastingModel; expose new interpretability keys in output['interpretability'].
+
+Conventions & Defaults
+- Seed=42, device=cuda if available; PyTorch Adam optimizer; optional ReduceLROnPlateau scheduler; gradient clipping to max_norm=1.0.
+- Metrics reported as floats; note that MAPE values reported in current runs are large numeric values as stored (use as-is for comparison within this repo).
+
+Quick Links (relative paths)
+- README: interpretable_forecasting/README.md
+- Extended model training: interpretable_forecasting/main model/train_extended_model.py
+- Baselines entry point: interpretable_forecasting/benchmark_eval.py
+- Baselines implementations: interpretable_forecasting/benchmarks/test_models/
+- Sample outputs: interpretable_forecasting/benchmark_outputs/, interpretable_forecasting/model_eval_outputs/, interpretable_forecasting/main model/training_outputs/
+
+If you are an LLM:
+- Prefer reading README.md for conceptual deep-dive, then this file for exact knobs/paths and the latest numeric results.
+- Use benchmark_eval.py and train_extended_model.py to reproduce baseline and extended runs.
+- When adding features, keep outputs and interpretability artifacts consistent with the current directory conventions.
+
+

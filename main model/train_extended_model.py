@@ -347,6 +347,8 @@ def main():
                         help='Spline smoothing strength in [0,1]')
     parser.add_argument('--no-spline-head', action='store_true',
                         help='Use simple linear head instead of spline head (diagnostics)')
+    parser.add_argument('--no-residual-head', action='store_true',
+                        help='Disable residual correction head on top of spline forecasts')
     
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50)
@@ -420,7 +422,9 @@ def main():
         dropout=args.dropout,
         num_compression_queries=args.num_compression_queries,
         spline_smooth_alpha=args.spline_smooth_alpha,
-        use_spline_head=not args.no_spline_head
+        use_spline_head=not args.no_spline_head,
+        use_residual_head=not args.no_residual_head,
+        residual_scale=1.0
     )
     
     model = InterpretableForecastingModel(model_config).to(device)

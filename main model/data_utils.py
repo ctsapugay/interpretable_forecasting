@@ -43,14 +43,15 @@ def load_ett_data(
         # Parse dates
         dates = pd.to_datetime(df['date'])
         
-        print(f"✅ Loaded ETT data: {data.shape[0]} samples, {data.shape[1]} variables")
+        # Avoid non-ASCII symbols so this prints cleanly on Windows consoles.
+        print(f"[OK] Loaded ETT data: {data.shape[0]} samples, {data.shape[1]} variables")
         print(f"   Date range: {dates.iloc[0]} to {dates.iloc[-1]}")
         print(f"   Variables: {variables}")
         
         return data, dates, variables
         
     except FileNotFoundError:
-        print(f"❌ ETT dataset not found at {file_path}")
+        print(f"[ERROR] ETT dataset not found at {file_path}")
         raise
 
 
@@ -97,7 +98,8 @@ def normalize_data(data: np.ndarray, method: str = 'standard') -> Tuple[np.ndarr
     else:
         raise ValueError(f"Unknown normalization method: {method}")
     
-    print(f"✅ Applied {method} normalization")
+    # Avoid non-ASCII symbols so this prints cleanly on Windows consoles.
+    print(f"[OK] Applied {method} normalization")
     print(f"   Original range: [{data.min():.3f}, {data.max():.3f}]")
     print(f"   Normalized range: [{normalized_data.min():.3f}, {normalized_data.max():.3f}]")
     
@@ -167,7 +169,7 @@ def create_time_windows(
         if return_indices:
             indices[i] = start_idx
     
-    print(f"✅ Created {num_windows} windows of size {window_size}")
+    print(f"[OK] Created {num_windows} windows of size {window_size}")
     print(f"   Input shape: {data.shape}")
     print(f"   Output shape: {windows.shape}")
     print(f"   Stride: {stride}")
@@ -217,7 +219,7 @@ def create_forecasting_dataset(
         inputs[i] = data[start_idx:input_end]
         targets[i] = data[input_end:target_end]
     
-    print(f"✅ Created forecasting dataset: {num_samples} samples")
+    print(f"[OK] Created forecasting dataset: {num_samples} samples")
     print(f"   Input sequences: {inputs.shape}")
     print(f"   Target sequences: {targets.shape}")
     
@@ -268,7 +270,7 @@ class ETTDataLoader:
         self.raw_data, self.dates, self.variables = load_ett_data(file_path, num_samples)
         self.data, self.norm_stats = normalize_data(self.raw_data, normalize)
         
-        print(f"✅ ETTDataLoader initialized")
+        print(f"[OK] ETTDataLoader initialized")
         print(f"   Data shape: {self.data.shape}")
         print(f"   Variables: {self.variables}")
     
@@ -334,10 +336,10 @@ class ETTDataLoader:
                     inputs, targets = to_torch_tensors(inputs, targets)
                 
                 datasets[horizon] = (inputs, targets)
-                print(f"✅ Created dataset for horizon {horizon}: {inputs.shape[0]} samples")
+                print(f"[OK] Created dataset for horizon {horizon}: {inputs.shape[0]} samples")
                 
             except ValueError as e:
-                print(f"⚠️  Skipping horizon {horizon}: {e}")
+                print(f"[WARN] Skipping horizon {horizon}: {e}")
                 continue
         
         return datasets
@@ -418,7 +420,7 @@ class ETTDataLoader:
                 splits[split_name] = to_torch_tensors(inputs, targets)
         
         # Print split information
-        print(f"✅ Created forecasting splits:")
+        print(f"[OK] Created forecasting splits:")
         for split_name, (inputs, targets) in splits.items():
             print(f"   {split_name}: {inputs.shape[0]} samples, inputs {inputs.shape}, targets {targets.shape}")
         
@@ -463,10 +465,10 @@ class ETTDataLoader:
                     as_torch=as_torch
                 )
                 multi_horizon_splits[horizon] = splits
-                print(f"✅ Created splits for horizon {horizon}")
+                print(f"[OK] Created splits for horizon {horizon}")
                 
             except ValueError as e:
-                print(f"⚠️  Skipping horizon {horizon}: {e}")
+                print(f"[WARN] Skipping horizon {horizon}: {e}")
                 continue
         
         return multi_horizon_splits
@@ -607,14 +609,14 @@ class ETTDataLoader:
 
 if __name__ == "__main__":
     # Test the data loading utilities
-    print("🧪 Testing data loading utilities...")
+    print("[INFO] Testing data loading utilities...")
     
     # Test basic data loading
     try:
         data, dates, variables = load_ett_data(num_samples=100)
-        print(f"✅ Basic loading test passed")
+        print(f"[OK] Basic loading test passed")
     except Exception as e:
-        print(f"❌ Basic loading test failed: {e}")
+        print(f"[ERROR] Basic loading test failed: {e}")
         exit(1)
     
     # Test normalization
@@ -623,25 +625,25 @@ if __name__ == "__main__":
     
     # Check if denormalization works
     if np.allclose(data, denormalized_data, atol=1e-5):
-        print("✅ Normalization/denormalization test passed")
+        print("[OK] Normalization/denormalization test passed")
     else:
-        print("❌ Normalization/denormalization test failed")
+        print("[ERROR] Normalization/denormalization test failed")
         exit(1)
     
     # Test windowing
     windows, indices = create_time_windows(data, window_size=10, stride=5, return_indices=True)
-    print(f"✅ Windowing test passed")
+    print(f"[OK] Windowing test passed")
     
     # Test forecasting dataset creation
     inputs, targets = create_forecasting_dataset(data, input_length=24, prediction_length=12)
-    print(f"✅ Forecasting dataset test passed")
+    print(f"[OK] Forecasting dataset test passed")
     
     # Test ETTDataLoader
     loader = ETTDataLoader(num_samples=200)
     windows_torch, _ = loader.get_windows(window_size=20)
     inputs_torch, targets_torch = loader.get_forecasting_data(input_length=48, prediction_length=24)
     
-    print(f"✅ ETTDataLoader basic test passed")
+    print(f"[OK] ETTDataLoader basic test passed")
     print(f"   Windows shape: {windows_torch.shape}")
     print(f"   Inputs shape: {inputs_torch.shape}")
     print(f"   Targets shape: {targets_torch.shape}")
@@ -651,7 +653,7 @@ if __name__ == "__main__":
         input_length=48, 
         forecast_horizons=[1, 12, 24, 48]
     )
-    print(f"✅ Multi-horizon dataset test passed")
+    print(f"[OK] Multi-horizon dataset test passed")
     for horizon, (inputs, targets) in multi_horizon_data.items():
         print(f"   Horizon {horizon}: inputs {inputs.shape}, targets {targets.shape}")
     
@@ -663,7 +665,7 @@ if __name__ == "__main__":
         val_ratio=0.2,
         test_ratio=0.2
     )
-    print(f"✅ Train/val/test splits test passed")
+    print(f"[OK] Train/val/test splits test passed")
     
     # Test multi-horizon splits
     multi_splits = loader.create_multi_horizon_splits(
@@ -673,7 +675,7 @@ if __name__ == "__main__":
         val_ratio=0.2,
         test_ratio=0.2
     )
-    print(f"✅ Multi-horizon splits test passed")
+    print(f"[OK] Multi-horizon splits test passed")
     
     # Test evaluation functionality
     # Create some synthetic predictions for testing
@@ -683,7 +685,7 @@ if __name__ == "__main__":
     # Test denormalization
     denorm_predictions = loader.denormalize_predictions(synthetic_predictions)
     denorm_targets = loader.denormalize_predictions(train_targets)
-    print(f"✅ Denormalization test passed")
+    print(f"[OK] Denormalization test passed")
     print(f"   Normalized range: [{synthetic_predictions.min():.3f}, {synthetic_predictions.max():.3f}]")
     print(f"   Denormalized range: [{denorm_predictions.min():.3f}, {denorm_predictions.max():.3f}]")
     
@@ -692,7 +694,7 @@ if __name__ == "__main__":
         synthetic_predictions, train_targets, 
         denormalize=True, per_variable=True, per_horizon=True
     )
-    print(f"✅ Metrics computation test passed")
+    print(f"[OK] Metrics computation test passed")
     print(f"   Overall MSE: {metrics['overall']['mse']:.4f}")
     print(f"   Variables with metrics: {list(metrics['per_variable'].keys())}")
     if 'per_horizon' in metrics:
@@ -704,9 +706,9 @@ if __name__ == "__main__":
             synthetic_predictions, train_targets,
             denormalize=True, compute_intervals=False
         )
-        print(f"✅ Comprehensive evaluation test passed")
+        print(f"[OK] Comprehensive evaluation test passed")
         print(f"   Evaluation keys: {list(eval_results.keys())}")
     except Exception as e:
-        print(f"⚠️  Comprehensive evaluation test skipped: {e}")
+        print(f"[WARN] Comprehensive evaluation test skipped: {e}")
     
-    print("\n🎉 All data loading utility tests passed!")
+    print("\n[OK] All data loading utility tests passed!")

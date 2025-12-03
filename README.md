@@ -133,20 +133,37 @@ loader = ETTDataLoader(
 )
 
 # Create extended model configuration
-config = ExtendedModelConfig(
-    num_variables=7,           # ETT dataset variables
-    embed_dim=32,              # Base embedding dimension
-    hidden_dim=64,             # Univariate learner hidden size
-    num_heads=4,               # Temporal attention heads
-    cross_dim=32,              # Cross-attention dimension
-    cross_heads=4,             # Cross-attention heads
-    compressed_dim=64,         # Compressed representation size
-    compression_ratio=4,       # Temporal compression ratio
-    num_control_points=8,      # B-spline control points
-    spline_degree=3,           # Cubic B-splines
-    forecast_horizon=24,       # Predict 24 steps ahead
-    dropout=0.1
-)
+  config = ExtendedModelConfig(
+      # Core dimensions
+      num_variables=7,           # ETT dataset variables
+      embed_dim=32,
+      hidden_dim=64,
+      num_heads=4,
+
+      # Cross-variable attention
+      cross_dim=32,
+      cross_heads=4,
+
+      # Temporal compression
+      compressed_dim=64,
+      compression_ratio=4,
+      num_compression_queries=2,   # Multi-query compression (v2)
+
+      # Spline forecasting
+      num_control_points=16,
+      spline_degree=3,
+      forecast_horizon=24,
+      spline_stability=True,
+      spline_smooth_alpha=0.3,     # Tunable smoothing in [0, 1]
+
+      # Heads
+      use_spline_head=True,
+      use_residual_head=False,     # For pure spline interpretability
+      residual_scale=1.0,
+
+      # Regularization
+      dropout=0.1
+  )
 
 # Create extended forecasting model
 model = InterpretableForecastingModel(config)
@@ -199,22 +216,74 @@ print(f"Forecast MSE: {mse:.6f}, MAE: {mae:.6f}")
 ```
 
 ### Running Extended Model Validation
+  
+  ```bash
+  # Test the complete extended model with ETT data and spline visualizations
+  python validate_extended_model.py
+  ```
+  
+  This comprehensive validation will:
+  - Load ETT dataset and preprocess it
+  - Test extended model with different sequence lengths (24, 96, 168, 336 steps)
+  - Verify gradient computation through all components
+  - Test cross-attention, temporal compression, and spline forecasting
+  - Generate spline visualizations with accuracy assessment
+  - Test multiple forecast horizons (1, 12, 24, 48 steps)
+  - Save results and visualizations
+
+### Training the Extended Model on ETTh1
 
 ```bash
-# Test the complete extended model with ETT data and spline visualizations
-python validate_extended_model.py
+cd interpretable_forecasting
+
+python "main model/train_extended_model.py" \
+  --data-path "ETT-small/ETTh1.csv" \
+  --input-length 96 \
+  --forecast-horizon 24 \
+  --batch-size 32 \
+  --epochs 50 \
+  --lr 5e-4 \
+  --num-compression-queries 2 \
+  --num-control-points 16 \
+  --spline-smooth-alpha 0.3 \
+  --no-residual-head
 ```
 
-This comprehensive validation will:
-- Load ETT dataset and preprocess it
-- Test extended model with different sequence lengths (24, 96, 168, 336 steps)
-- Verify gradient computation through all components
-- Test cross-attention, temporal compression, and spline forecasting
-- Generate spline visualizations with accuracy assessment
-- Test multiple forecast horizons (1, 12, 24, 48 steps)
-- Save results and visualizations
+This script uses `ETTDataSplitter` for proper temporal train/val/test splits, train-only normalization, and saves outputs under `main model/training_outputs/<timestamp>/` (including `config.json`, `test_results.json`, and spline visualizations).
 
-### Running Spline Visualization Tests
+### Hyperparameter Sweeps for the Extended Model
+
+To run a small suite of extended-model configurations (varying spline smoothness, number of control points, residual head on/off):
+
+```bash
+python "main model/model_eval.py"
+```
+
+Runs are saved under `model_eval_outputs/<experiment_name>/<timestamp>/`.
+
+### Benchmark Baselines (LSTM, TCN, Seasonal Naive)
+
+To train baseline models with the same ETTh1 setup (splits, normalization, window sizes) and comparable metrics:
+
+```bash
+python benchmark_eval.py --epochs 50
+```
+
+This trains:
+
+- LSTM baseline
+- TCN baseline
+- Seasonal naive baseline
+
+All use `ETT-small/ETTh1.csv`, `input_length=96`, `forecast_horizon=24`, and train-only normalization via `ETTDataSplitter`. Outputs are written to:
+
+- `benchmark_outputs/lstm_baseline/<timestamp>/`
+- `benchmark_outputs/tcn_baseline/<timestamp>/`
+- `benchmark_outputs/seasonal_naive/<timestamp>/`
+
+Each contains `config.json`, `test_results.json`, `results.json`, and `forecast_examples.png`.
+  
+  ### Running Spline Visualization Tests
 
 ```bash
 # Generate spline forecasting visualizations with accuracy metrics

@@ -4,19 +4,23 @@ import json
 import time
 import argparse
 from pathlib import Path
-import torch
 
-# Add parent 'main model' for data utilities
-_main_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'main model'))
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+
+# Add parent 'main model' for data utilities (repo_root / "main model")
+_main_model_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "main model")
+)
 if _main_model_path not in sys.path:
     sys.path.insert(0, _main_model_path)
-from data_utils import ETTDataLoader
 
-from train_utils import set_seed, prepare_dataloaders, evaluate_loop
+from data_splitting import ETTDataSplitter, DataSplitConfig
+from train_utils import set_seed, evaluate_loop, plot_forecast_examples
 from seasonal_naive_baseline import SeasonalNaive, SeasonalNaiveConfig
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--file-path", type=str, default="interpretable_forecasting/ETT-small/ETTh1.csv")
     p.add_argument("--normalize", type=str, default="standard", choices=["standard", "minmax", "none"])
@@ -40,18 +44,34 @@ def main():
     save_dir = save_root / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    loader = ETTDataLoader(file_path=args.file_path, normalize=args.normalize)
-    num_vars = loader.data.shape[1]
-    _, val_dl, test_dl, _ = prepare_dataloaders(
-        loader=loader,
-        input_len=args.input_length,
-        pred_len=args.forecast_horizon,
-        batch_size=256,
+    split_cfg = DataSplitConfig(
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
-        stride=args.stride,
     )
+    splitter = ETTDataSplitter(
+        file_path=args.file_path,
+        split_config=split_cfg,
+        normalize=args.normalize,
+    )
+    num_vars = len(splitter.variables)
+
+    def _make_loader(split: str, batch_size: int) -> DataLoader:
+        x, y = splitter.get_forecasting_data(
+            split=split,
+            input_length=args.input_length,
+            prediction_length=args.forecast_horizon,
+            stride=args.stride,
+            as_torch=True,
+        )
+        ds = TensorDataset(x, y)
+        return DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=False)
+
+    val_dl = _make_loader("val", batch_size=256)
+    test_dl = _make_loader("test", batch_size=256)
+
+    norm_stats = splitter.splitter.norm_stats
+    variable_names = splitter.variables
 
     cfg = SeasonalNaiveConfig(
         input_length=args.input_length,
@@ -61,11 +81,27 @@ def main():
     )
     model = SeasonalNaive(cfg).to(device)
 
-    print(f"\n🧪 Evaluating Seasonal Naive (S={args.season_length}) on {device}")
-    val_metrics = evaluate_loop(model, val_dl, device, loader.norm_stats, denorm=True)
-    test_metrics = evaluate_loop(model, test_dl, device, loader.norm_stats, denorm=True)
-    print(f"Val — mse={val_metrics['mse']:.6f}, mae={val_metrics['mae']:.6f}, rmse={val_metrics['rmse']:.6f}, mape={val_metrics['mape']:.6f}")
-    print(f"Test — mse={test_metrics['mse']:.6f}, mae={test_metrics['mae']:.6f}, rmse={test_metrics['rmse']:.6f}, mape={test_metrics['mape']:.6f}")
+    print(f"\n[INFO] Evaluating Seasonal Naive (S={args.season_length}) on {device}")
+    val_metrics = evaluate_loop(model, val_dl, device, norm_stats, denorm=True)
+    test_metrics = evaluate_loop(model, test_dl, device, norm_stats, denorm=True)
+    print(
+        f"Val mse={val_metrics['mse']:.6f}, mae={val_metrics['mae']:.6f}, "
+        f"rmse={val_metrics['rmse']:.6f}, mape={val_metrics['mape']:.6f}"
+    )
+    print(
+        f"Test mse={test_metrics['mse']:.6f}, mae={test_metrics['mae']:.6f}, "
+        f"rmse={test_metrics['rmse']:.6f}, mape={test_metrics['mape']:.6f}"
+    )
+
+    # Simple forecast visualization for this baseline run
+    plot_forecast_examples(
+        model=model,
+        data_loader=test_dl,
+        device=device,
+        norm_stats=norm_stats,
+        save_path=save_dir / "forecast_examples.png",
+        variable_names=variable_names,
+    )
 
     with open(save_dir / "results.json", "w") as f:
         json.dump(
@@ -79,13 +115,32 @@ def main():
             f,
             indent=2,
         )
-    print(f"\n✅ Done. Results: {save_dir / 'results.json'}")
+
+    # Extended-style artifacts
+    with open(save_dir / "test_results.json", "w") as f:
+        json.dump(
+            {
+                "test_loss": float(test_metrics["mse"]),
+                "test_metrics": {k: float(v) for k, v in test_metrics.items()},
+                "best_epoch": 0,
+            },
+            f,
+            indent=2,
+        )
+
+    with open(save_dir / "config.json", "w") as f:
+        json.dump(
+            {
+                "model_config": vars(cfg),
+                "train_args": vars(args),
+            },
+            f,
+            indent=2,
+        )
+
+    print(f"\n[OK] Done. Results: {save_dir / 'results.json'}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
 

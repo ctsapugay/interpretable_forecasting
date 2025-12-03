@@ -1,13 +1,15 @@
 import os
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
 from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+import matplotlib.pyplot as plt
+import numpy as np
 
-# Add parent 'main model' to sys.path to import data/eval utilities
-_main_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'main model'))
+# Add parent 'main model' to sys.path to import data/eval utilities (repo_root / "main model")
+_main_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "main model"))
 if _main_model_path not in sys.path:
     sys.path.insert(0, _main_model_path)
 
@@ -103,6 +105,114 @@ def evaluate_loop(
     return {k: float(v) for k, v in metrics.items()}
 
 
+def plot_forecast_examples(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    norm_stats: Dict,
+    save_path: Path,
+    variable_names: Optional[List[str]] = None,
+    max_vars: int = 4,
+    sample_idx: int = 0,
+) -> None:
+    """
+    Plot a small set of forecast examples for a trained baseline model.
+
+    This mirrors the extended model's main forecast visualization at a high level,
+    but without spline-specific details, so you can visually compare history,
+    true future, and model forecasts.
+    """
+    model.eval()
+
+    # Take a single batch from the dataloader
+    try:
+        xb, yb = next(iter(data_loader))
+    except StopIteration:
+        return
+
+    xb = xb.to(device)  # (B, T_in, M)
+    yb = yb.to(device)  # (B, H, M)
+
+    with torch.no_grad():
+        preds = batch_predict(model, xb)  # (B, M, H)
+        preds = preds.permute(0, 2, 1).contiguous()  # (B, H, M)
+
+        # Denormalize if needed
+        if norm_stats and norm_stats.get("method") != "none":
+            preds_mh = preds.permute(0, 2, 1).contiguous()
+            targs_mh = yb.permute(0, 2, 1).contiguous()
+            hist_mh = xb.permute(0, 2, 1).contiguous()
+
+            preds_dn_mh = denormalize_forecasts(preds_mh, norm_stats)
+            targs_dn_mh = denormalize_forecasts(targs_mh, norm_stats)
+            hist_dn_mh = denormalize_forecasts(hist_mh, norm_stats)
+
+            preds_np = preds_dn_mh.permute(0, 2, 1).cpu().numpy()
+            targets_np = targs_dn_mh.permute(0, 2, 1).cpu().numpy()
+            history_np = hist_dn_mh.permute(0, 2, 1).cpu().numpy()
+        else:
+            preds_np = preds.cpu().numpy()
+            targets_np = yb.cpu().numpy()
+            history_np = xb.cpu().numpy()
+
+    B, T_in, M = history_np.shape
+    H = preds_np.shape[1]
+
+    if B == 0 or M == 0:
+        return
+
+    sample_idx = min(sample_idx, B - 1)
+    hist = history_np[sample_idx]  # (T_in, M)
+    tgt = targets_np[sample_idx]   # (H, M)
+    fcst = preds_np[sample_idx]    # (H, M)
+
+    if variable_names is None:
+        variable_names = [f"Var_{i}" for i in range(M)]
+
+    t_hist = np.arange(T_in)
+    t_fcst = np.arange(T_in, T_in + H)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.flatten()
+
+    for i in range(min(M, max_vars)):
+        ax = axes[i]
+        var_name = variable_names[i]
+
+        ax.plot(t_hist, hist[:, i], label="History", color="blue", linewidth=2)
+        ax.plot(t_fcst, tgt[:, i], label="True Future", color="green", linestyle="--", linewidth=2)
+        ax.plot(t_fcst, fcst[:, i], label="Forecast", color="red", linewidth=2, marker="o", markersize=3)
+
+        mse = float(np.mean((fcst[:, i] - tgt[:, i]) ** 2))
+        mae = float(np.mean(np.abs(fcst[:, i] - tgt[:, i])))
+        ax.text(
+            0.02,
+            0.98,
+            f"MSE: {mse:.4f}\nMAE: {mae:.4f}",
+            transform=ax.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8),
+            fontsize=8,
+        )
+
+        ax.set_title(var_name)
+        ax.set_xlabel("Time Step")
+        ax.set_ylabel("Value")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+        # Mark forecast region
+        ax.axvline(x=T_in - 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1)
+        ax.axvspan(T_in - 0.5, t_fcst[-1] + 0.5, alpha=0.05, color="red")
+
+    plt.suptitle("Baseline Forecast Examples (History vs. Forecast vs. Truth)", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer, loss_fn, device) -> float:
     model.train()
     running = 0.0
@@ -120,6 +230,7 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer: torch.optim
         running += float(loss) * xb.size(0)
         n += xb.size(0)
     return running / max(n, 1)
+
 
 
 
