@@ -10,7 +10,7 @@ After a few seconds, the plots should begin displaying, with the second plot app
 
 In the first plot, you can see the line produced by the GAM in red, and the actual data points as gray dots. The x-axis describes the total time measured since the start, and the y-axis describes the Oil Temperature at the respective time since start.
 
-As seen, there is a lot of "wiggliness" which I may choose to easily fix by incorporating a smoothing penalty in the GAM formula. Regardless, the plot demonstartes that the GAM does a successful job of fitting the data, which tells me the smooth functions that make up the GAM are properly defined.
+As seen, there is a lot of "wiggliness" which I may choose to easily fix by incorporating a smoothing penalty in the GAM formula.
 ![The GAM line plotted against the actual data.](data-vs-gam.png)
 
 ---
