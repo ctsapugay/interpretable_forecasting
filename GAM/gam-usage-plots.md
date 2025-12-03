@@ -15,7 +15,7 @@ As seen, there is a lot of "wiggliness" which I may choose to easily fix by inco
 
 ---
 
-### GAM vs actual data:
+### Seasonality trends for interpretability:
 
 This seccond plot shows the smooth function trends, including the trend overall, the daily trend, and the weekly trend.
 
